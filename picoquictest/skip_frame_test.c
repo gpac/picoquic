@@ -5305,6 +5305,121 @@ static size_t nb_stream_ack_case = sizeof(stream_ack_case) / sizeof(stream_ack_c
 int picoquic_process_ack_of_stream_frame(picoquic_cnx_t* cnx, uint8_t* bytes,
     size_t bytes_max, size_t* consumed);
 
+typedef struct st_stream_ack_progress_test_t {
+    uint64_t offsets[4];
+    size_t count;
+    int invalid;
+} stream_ack_progress_test_t;
+
+static void stream_ack_progress_test_cb(picoquic_cnx_t* cnx, uint64_t stream_id,
+    uint64_t acknowledged_offset, void* callback_ctx, void* stream_ctx)
+{
+    stream_ack_progress_test_t* progress = (stream_ack_progress_test_t*)callback_ctx;
+    (void)cnx;
+    if (stream_id != 24 || stream_ctx != progress || progress->count >= 4) {
+        progress->invalid = 1;
+    }
+    else {
+        progress->offsets[progress->count++] = acknowledged_offset;
+    }
+}
+
+static int stream_ack_progress_test(picoquic_cnx_t* cnx)
+{
+    uint8_t later[] = { 0x0e, 24, 4, 4, 0, 0, 0, 0 };
+    uint8_t first[] = { 0x0a, 24, 4, 0, 0, 0, 0 };
+    uint8_t last_fin[] = { 0x0f, 24, 8, 4, 0, 0, 0, 0 };
+    uint8_t fin_only[] = { 0x0f, 24, 12, 0 };
+    uint8_t* frames[] = { later, fin_only, first, later, last_fin, last_fin, fin_only };
+    size_t lengths[] = { sizeof(later), sizeof(fin_only), sizeof(first), sizeof(later),
+        sizeof(last_fin), sizeof(last_fin), sizeof(fin_only) };
+    size_t expected_counts[] = { 0, 0, 1, 1, 2, 2, 2 };
+    stream_ack_progress_test_t progress = { { 0 }, 0, 0 };
+    picoquic_stream_head_t* stream = picoquic_create_stream(cnx, 24);
+    int ret = 0;
+
+    if (stream == NULL) {
+        return -1;
+    }
+    stream->sent_offset = 12;
+    picoquic_set_app_stream_ctx(cnx, 24, &progress);
+    picoquic_set_stream_ack_callback(cnx, stream_ack_progress_test_cb, &progress);
+    for (size_t i = 0; i < sizeof(frames) / sizeof(frames[0]); i++) {
+        size_t consumed = 0;
+        if (picoquic_process_ack_of_stream_frame(cnx, frames[i], lengths[i], &consumed) != 0 ||
+            consumed != lengths[i] || progress.invalid || progress.count != expected_counts[i]) {
+            DBG_PRINTF("Unexpected ACK progress at frame %zu", i);
+            ret = -1;
+            break;
+        }
+    }
+    if (ret == 0 && (progress.offsets[0] != 8 || progress.offsets[1] != 12)) {
+        DBG_PRINTF("%s", "Incorrect contiguous ACK offsets");
+        ret = -1;
+    }
+    picoquic_set_stream_ack_callback(cnx, NULL, NULL);
+    if (ret == 0) {
+        uint8_t more[] = { 0x0a, 28, 4, 0, 0, 0, 0 };
+        size_t consumed = 0;
+        picoquic_stream_head_t* other = picoquic_create_stream(cnx, 28);
+        if (other != NULL) {
+            other->sent_offset = 4;
+        }
+        if (other == NULL || picoquic_process_ack_of_stream_frame(cnx, more, sizeof(more), &consumed) != 0 ||
+            consumed != sizeof(more) || progress.count != 2 || progress.invalid) {
+            DBG_PRINTF("%s", "ACK callback was not disabled");
+            ret = -1;
+        }
+    }
+    picoquic_unlink_app_stream_ctx(cnx, 24);
+    return ret;
+}
+
+typedef struct st_stream_ack_simulation_t {
+    uint64_t offset;
+    int invalid;
+} stream_ack_simulation_t;
+
+static void stream_ack_simulation_cb(picoquic_cnx_t* cnx, uint64_t stream_id,
+    uint64_t acknowledged_offset, void* callback_ctx, void* stream_ctx)
+{
+    stream_ack_simulation_t* progress = (stream_ack_simulation_t*)callback_ctx;
+    (void)cnx;
+    (void)stream_ctx;
+    if (stream_id != 4 || acknowledged_offset <= progress->offset ||
+        acknowledged_offset > 20000) {
+        progress->invalid = 1;
+    }
+    progress->offset = acknowledged_offset;
+}
+
+static int stream_ack_simulation_test(uint64_t loss_mask)
+{
+    uint64_t simulated_time = 0;
+    picoquic_test_tls_api_ctx_t* test_ctx = NULL;
+    test_api_stream_desc_t scenario[] = { { 4, 0, 20000, 2000 } };
+    stream_ack_simulation_t progress = { 0, 0 };
+    int ret = tls_api_one_scenario_init(&test_ctx, &simulated_time, 0, NULL, NULL);
+
+    if (ret == 0) {
+        picoquic_set_stream_ack_callback(test_ctx->cnx_client, stream_ack_simulation_cb, &progress);
+        ret = tls_api_one_scenario_body(test_ctx, &simulated_time, scenario, sizeof(scenario),
+            0, loss_mask, 128000, 0, 0);
+    }
+    if (ret == 0 && (progress.invalid || progress.offset != 20000)) {
+        DBG_PRINTF("Unexpected simulated ACK progress: %" PRIu64, progress.offset);
+        ret = -1;
+    }
+    if (ret == 0 && loss_mask && test_ctx->cnx_client->nb_retransmission_total == 0) {
+        DBG_PRINTF("%s", "The simulated loss did not cause client retransmissions");
+        ret = -1;
+    }
+    if (test_ctx != NULL) {
+        tls_api_delete_ctx(test_ctx);
+    }
+    return ret;
+}
+
 int stream_ack_test(void)
 {
     int ret = 0;
@@ -5405,9 +5520,18 @@ int stream_ack_test(void)
         }
     }
 
+    if (ret == 0) {
+        ret = stream_ack_progress_test(cnx);
+    }
     if (quic != NULL) {
         picoquic_free(quic);
     }
 
+    if (ret == 0) {
+        ret = stream_ack_simulation_test(0);
+    }
+    if (ret == 0) {
+        ret = stream_ack_simulation_test(0x515);
+    }
     return ret;
 }

@@ -354,16 +354,9 @@ int picoquic_add_to_stream_with_ctx(picoquic_cnx_t* cnx, uint64_t stream_id,
     PICOQUIC_THREAD_CHECK(cnx->quic);
 
     stream = picoquic_find_stream_for_writing(cnx, stream_id, &ret);
-    if (ret == 0 && set_fin) {
-        if (stream->fin_requested) {
-            /* app error, notified the fin twice*/
-            if (length > 0) {
-                ret = -1;
-            }
-        }
-        else {
-            stream->fin_requested = 1;
-        }
+    if (ret == 0 && set_fin && stream->fin_requested && length > 0) {
+        /* app error, notified the fin twice */
+        ret = -1;
     }
 
     /* If our side has sent RST_STREAM or received STOP_SENDING, we should not send anymore data. */
@@ -406,6 +399,9 @@ int picoquic_add_to_stream_with_ctx(picoquic_cnx_t* cnx, uint64_t stream_id,
     }
 
     if (ret == 0) {
+        if (set_fin) {
+            stream->fin_requested = 1;
+        }
         if (length > 0 || set_fin) {
             picoquic_reinsert_by_wake_time(cnx->quic, cnx, picoquic_get_quic_time(cnx->quic));
         }

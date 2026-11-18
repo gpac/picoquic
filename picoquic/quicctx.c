@@ -4686,6 +4686,14 @@ void picoquic_set_callback(picoquic_cnx_t* cnx,
     cnx->callback_ctx = callback_ctx;
 }
 
+void picoquic_set_stream_ack_callback(picoquic_cnx_t* cnx,
+    picoquic_stream_ack_cb_fn callback_fn, void* callback_ctx)
+{
+    PICOQUIC_THREAD_CHECK(cnx->quic);
+    cnx->stream_ack_callback_fn = callback_fn;
+    cnx->stream_ack_callback_ctx = callback_ctx;
+}
+
 picoquic_stream_data_cb_fn picoquic_get_default_callback_function(picoquic_quic_t* quic)
 {
     PICOQUIC_THREAD_CHECK(quic);

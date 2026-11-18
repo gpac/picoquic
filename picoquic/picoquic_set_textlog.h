@@ -26,10 +26,15 @@ extern "C" {
 #endif
 
 #include "picoquic.h"
+#include <stdio.h>
 /* Set the text log file and start tracing into it.
     * Set to NULL value to stop text log.
     */
 int picoquic_set_textlog(picoquic_quic_t* quic, char const* textlog_file);
+
+/* Trace to a caller-owned stream, which must remain open until quic is freed.
+ * Registering a different stream on the same context returns an error. */
+int picoquic_set_textlog_stream(picoquic_quic_t* quic, FILE* stream);
 
 #ifdef __cplusplus
 }

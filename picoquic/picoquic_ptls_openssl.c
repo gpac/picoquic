@@ -46,6 +46,7 @@ void picoquic_openssl_load(int unload)
 #endif
 #include <openssl/pem.h>
 #include <openssl/err.h>
+#include <limits.h>
 #if !defined(OPENSSL_NO_ENGINE)
 #include <openssl/engine.h>
 #endif
@@ -123,7 +124,8 @@ static int set_openssl_sign_certificate_from_key(EVP_PKEY* pkey, ptls_context_t*
     }
     else {
         ret = ptls_openssl_init_sign_certificate(signer, pkey);
-        ctx->sign_certificate = &signer->super;
+        if (ret == 0)
+            ctx->sign_certificate = &signer->super;
     }
 
     if (pkey != NULL) {
@@ -135,6 +137,23 @@ static int set_openssl_sign_certificate_from_key(EVP_PKEY* pkey, ptls_context_t*
     }
 
     return ret;
+}
+
+static int set_openssl_private_key_from_der(ptls_context_t* ctx, const uint8_t* data, size_t len)
+{
+    const unsigned char* cursor = data;
+    EVP_PKEY* key;
+
+    if (len > LONG_MAX)
+        return -1;
+    key = d2i_AutoPrivateKey(NULL, &cursor, (long)len);
+    if (key == NULL)
+        return -1;
+    if (cursor != data + len) {
+        EVP_PKEY_free(key);
+        return -1;
+    }
+    return set_openssl_sign_certificate_from_key(key, ctx);
 }
 
 /* Set the certificate signature function and context using openSSL
@@ -466,6 +485,7 @@ void picoquic_ptls_openssl_load(int unload)
 #endif
         picoquic_register_tls_key_provider_fn(
             set_openssl_private_key_from_key_file,
+            set_openssl_private_key_from_der,
             picoquic_openssl_dispose_sign_certificate,
             picoquic_openssl_get_certs_from_file,
             picoquic_openssl_get_public_key_from_key_file);

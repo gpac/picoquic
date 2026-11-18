@@ -109,6 +109,7 @@ ptls_key_exchange_algorithm_t* picoquic_key_exchange_secp256r1[2] = { 0 };
 ptls_hpke_cipher_suite_t* picoquic_hpke_cipher_suites[PICOQUIC_HPKE_CIPHER_SUITE_NB_MAX + 1] = { 0 };
 ptls_hpke_kem_t* picoquic_hpke_kems[PICOQUIC_HPKE_KEM_NB_MAX + 1] = { 0 };
 picoquic_set_private_key_from_file_t picoquic_set_private_key_from_file_fn = NULL;
+static picoquic_set_tls_key_provider_t picoquic_set_tls_key_fn = NULL;
 picoquic_dispose_sign_certificate_t picoquic_dispose_sign_certificate_fn = NULL;
 picoquic_get_certs_from_file_t picoquic_get_certs_from_file_fn = NULL;
 picoquic_get_public_key_from_private_t picoquic_get_public_key_from_private_fn = NULL;
@@ -206,6 +207,7 @@ static void picoquic_tls_api_zero(void)
     memset((void*)picoquic_key_exchanges, 0, sizeof(picoquic_key_exchanges));
 
     picoquic_set_private_key_from_file_fn = NULL;
+    picoquic_set_tls_key_fn = NULL;
     picoquic_dispose_sign_certificate_fn = NULL;
     picoquic_get_certs_from_file_fn = NULL;
     picoquic_get_public_key_from_private_fn = NULL;
@@ -357,6 +359,7 @@ void picoquic_register_hpke_kem(ptls_hpke_kem_t* hpke_kem)
 
 void picoquic_register_tls_key_provider_fn(
     picoquic_set_private_key_from_file_t set_key_from_key_file_fn,
+    picoquic_set_tls_key_provider_t set_key_from_der_fn,
     picoquic_dispose_sign_certificate_t dispose_sign_certificate_fn,
     picoquic_get_certs_from_file_t get_certs_from_file_fn,
     picoquic_get_public_key_from_private_t get_public_key_from_private_fn)
@@ -364,6 +367,7 @@ void picoquic_register_tls_key_provider_fn(
     DBG_PRINTF("%s", "Loading set key functions.");
     if (set_key_from_key_file_fn != NULL) {
         picoquic_set_private_key_from_file_fn = set_key_from_key_file_fn;
+        picoquic_set_tls_key_fn = set_key_from_der_fn;
         picoquic_dispose_sign_certificate_fn = dispose_sign_certificate_fn;
         picoquic_get_certs_from_file_fn = get_certs_from_file_fn;
     }
@@ -803,6 +807,27 @@ void picoquic_dispose_sign_certificate(ptls_context_t* ctx)
         free(ctx->sign_certificate);
         ctx->sign_certificate = NULL;
     }
+}
+
+int picoquic_set_tls_key(picoquic_quic_t* quic, const uint8_t* data, size_t len)
+{
+    ptls_context_t replacement = { 0 };
+    ptls_context_t* ctx;
+    int ret;
+
+    if (quic == NULL || data == NULL || len == 0 || quic->cnx_list != NULL ||
+        picoquic_set_tls_key_fn == NULL)
+        return -1;
+    PICOQUIC_THREAD_CHECK(quic);
+    ctx = (ptls_context_t*)quic->tls_master_ctx;
+    if (ctx == NULL)
+        return -1;
+    ret = picoquic_set_tls_key_fn(&replacement, data, len);
+    if (ret != 0)
+        return ret;
+    picoquic_dispose_sign_certificate(ctx);
+    ctx->sign_certificate = replacement.sign_certificate;
+    return 0;
 }
 
 /* Read certificates from a file

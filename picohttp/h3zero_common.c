@@ -734,11 +734,12 @@ static int h3zero_check_frame_type(h3zero_data_stream_state_t* stream_state,
 		}
 	}
 	else if (stream_state->current_frame_type == h3zero_frame_header) {
-		/* We do not expect a third header on the same stream, or even a
-		 * second header if no data has been received -- or if the stream was
-		 * upgraded by a connect call */
+		/* A second header is a trailer. Legacy parsing requires DATA first;
+		 * callback-based parsing also accepts trailers after an empty body.
+		 * No trailer is expected for a web transport. */
 		if (stream_state->header_found &&
-			(!stream_state->data_found || stream_state->trailer_found ||
+			((!stream_state->data_found && !stream_state->header_field_callback &&
+				!stream_state->header_section_callback) || stream_state->trailer_found ||
 				stream_state->is_web_transport)) {
 			/* protocol error */
 			*error_found = H3ZERO_FRAME_UNEXPECTED;
@@ -801,10 +802,33 @@ static uint8_t* h3zero_parse_frame_prefix(uint8_t* bytes, uint8_t* bytes_max,
 	return bytes;
 }
 
+typedef struct st_h3zero_field_callback_context_t {
+	h3zero_header_field_cb_fn callback;
+	void* callback_ctx;
+	int failed;
+} h3zero_field_callback_context_t;
+
+static int h3zero_stream_field_callback(const uint8_t* name, size_t name_length,
+	const uint8_t* value, size_t value_length, int is_trailer, void* context)
+{
+	h3zero_field_callback_context_t* field_ctx = (h3zero_field_callback_context_t*)context;
+	int ret = field_ctx->callback == NULL ? 0 :
+		field_ctx->callback(name, name_length, value, value_length,
+			is_trailer, field_ctx->callback_ctx);
+	if (ret != 0) {
+		field_ctx->failed = 1;
+	}
+	return ret;
+}
+
 uint8_t* h3zero_parse_header_frame(uint8_t* bytes, size_t available,
 	h3zero_data_stream_state_t* stream_state, uint64_t* error_found)
 {
 	if (stream_state->current_frame == NULL) {
+		if (stream_state->current_frame_length < 2) {
+			*error_found = H3ZERO_FRAME_ERROR;
+			return NULL;
+		}
         if (stream_state->current_frame_length > H3ZERO_MAX_FIELD_SECTION_SIZE) {
             /* error, excessive load */
             *error_found = H3ZERO_EXCESSIVE_LOAD;
@@ -823,17 +847,44 @@ uint8_t* h3zero_parse_header_frame(uint8_t* bytes, size_t available,
 
 		if (stream_state->current_frame_read >= stream_state->current_frame_length) {
 			uint8_t* parsed;
+			int callbacks_enabled = stream_state->header_field_callback != NULL ||
+				stream_state->header_section_callback != NULL;
+			h3zero_header_section_type_t section_type;
+			h3zero_field_callback_context_t field_ctx = {
+				stream_state->header_field_callback, stream_state->header_field_callback_ctx, 0
+			};
 			h3zero_header_parts_t* parts = (stream_state->header_found) ?
 				&stream_state->trailer : &stream_state->header;
 			stream_state->trailer_found = stream_state->header_found;
 			stream_state->header_found = 1;
 			/* parse */
-			parsed = h3zero_parse_qpack_header_frame(stream_state->current_frame,
-				stream_state->current_frame + stream_state->current_frame_length, parts);
+			parsed = h3zero_parse_qpack_header_frame_ex(stream_state->current_frame,
+				stream_state->current_frame + stream_state->current_frame_length, parts,
+				callbacks_enabled);
+			if (parsed != NULL && callbacks_enabled) {
+				parsed = h3zero_parse_qpack_header_fields(stream_state->current_frame,
+					stream_state->current_frame + stream_state->current_frame_length,
+					h3zero_stream_field_callback, &field_ctx,
+					stream_state->trailer_found);
+			}
+			section_type = stream_state->trailer_found ? h3zero_header_section_trailer :
+				(parts->status >= 100 && parts->status < 200 ? h3zero_header_section_informational :
+					h3zero_header_section_initial);
+			if (parsed != NULL && (size_t)(parsed - stream_state->current_frame) == stream_state->current_frame_length &&
+				stream_state->header_section_callback != NULL &&
+				stream_state->header_section_callback(section_type, stream_state->header_section_callback_ctx) != 0) {
+				field_ctx.failed = 1;
+				parsed = NULL;
+			}
 			if (parsed == NULL || (size_t)(parsed - stream_state->current_frame) != stream_state->current_frame_length) {
 				/* protocol error */
-				*error_found = H3ZERO_FRAME_ERROR;
+				*error_found = field_ctx.failed ? H3ZERO_INTERNAL_ERROR : H3ZERO_FRAME_ERROR;
 				bytes = NULL;
+			}
+			else if (callbacks_enabled && section_type == h3zero_header_section_informational) {
+				h3zero_release_header_parts(parts);
+				memset(parts, 0, sizeof(*parts));
+				stream_state->header_found = 0;
 			}
 			/* free resource */
 			stream_state->frame_prefix_parsed = 0;

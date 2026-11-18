@@ -410,12 +410,13 @@ uint8_t* h3zero_parse_qpack_header_value_string(uint8_t * bytes, uint8_t* decode
     return bytes;
 }
 
-uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
-    http_header_enum_t header, h3zero_header_parts_t * parts)
+static uint8_t * h3zero_parse_qpack_header_value_ex(uint8_t * bytes, uint8_t * bytes_max,
+    http_header_enum_t header, h3zero_header_parts_t * parts, int allow_duplicates)
 {
     uint64_t v_length = 0;
     int is_huffman = 0;
     uint8_t * decoded = NULL;
+    uint8_t * allocated = NULL;
     size_t decoded_length;
     uint8_t deHuff[256];
 
@@ -432,10 +433,24 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
         }
         else {
             if (is_huffman) {
+                size_t capacity = sizeof(deHuff);
+                if (v_length > H3ZERO_MAX_FIELD_SECTION_SIZE) {
+                    return NULL;
+                }
+                if (v_length > sizeof(deHuff) * 5 / 8) {
+                    capacity = (size_t)v_length * 8 / 5 + 1;
+                    if (capacity > H3ZERO_MAX_FIELD_SECTION_SIZE) {
+                        capacity = H3ZERO_MAX_FIELD_SECTION_SIZE;
+                    }
+                    allocated = malloc(capacity);
+                    if (allocated == NULL) {
+                        return NULL;
+                    }
+                }
                 if (hzero_qpack_huffman_decode(
-                    bytes, bytes + v_length, deHuff, sizeof(deHuff), &decoded_length) == 0)
+                    bytes, bytes + v_length, allocated ? allocated : deHuff, capacity, &decoded_length) == 0)
                 {
-                    decoded = deHuff;
+                    decoded = allocated ? allocated : deHuff;
                 }
                 else {
                     /* this is an error case, should be treated as such. */
@@ -451,8 +466,7 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
                 switch (header) {
                 case http_pseudo_header_method:
                     if (parts->method != h3zero_method_none) {
-                        /* Duplicate method! */
-                        bytes = 0;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         parts->method = h3zero_get_method_by_name(decoded, decoded_length);
@@ -460,8 +474,7 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
                     break;
                 case http_header_content_type:
                     if (parts->content_type != h3zero_content_type_none) {
-                        /* Duplicate content type! */
-                        bytes = 0;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         parts->content_type = h3zero_get_content_type_by_name(decoded, decoded_length);
@@ -469,8 +482,7 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
                     break;
                 case http_pseudo_header_status:
                     if (parts->status != 0) {
-                        /* Duplicate content type! */
-                        bytes = 0;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         /* TODO: decimal to binary */
@@ -479,8 +491,7 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
                     break;
                 case http_pseudo_header_path:
                     if (parts->path != NULL) {
-                        /* Duplicate content type! */
-                        bytes = 0;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         bytes = h3zero_parse_qpack_header_value_string(bytes, decoded,
@@ -489,8 +500,7 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
                     break;
                 case http_pseudo_header_authority:
                     if (parts->authority != NULL) {
-                        /* Duplicate authority! */
-                        bytes = 0;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         bytes = h3zero_parse_qpack_header_value_string(bytes, decoded,
@@ -499,8 +509,7 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
                     break;
                 case http_header_origin:
                     if (parts->origin != NULL) {
-                        /* Duplicate origin! */
-                        bytes = 0;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         bytes = h3zero_parse_qpack_header_value_string(bytes, decoded,
@@ -509,8 +518,7 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
                     break;
                 case http_header_range:
                     if (parts->range != NULL) {
-                        /* Duplicate content type! */
-                        bytes = 0;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         bytes = h3zero_parse_qpack_header_value_string(bytes, decoded,
@@ -519,8 +527,7 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
                     break;
                 case http_pseudo_header_protocol:
                     if (parts->protocol != NULL) {
-                        /* Duplicate content type! */
-                        bytes = 0;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         bytes = h3zero_parse_qpack_header_value_string(bytes, decoded,
@@ -530,8 +537,7 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
 
                 case http_header_wt_available_protocols:
                     if (parts->wt_available_protocols != NULL) {
-                        /* Duplicate content type! */
-                        bytes = 0;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         bytes = h3zero_parse_qpack_header_value_string(bytes, decoded,
@@ -541,8 +547,7 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
 
                 case http_header_wt_protocol:
                     if (parts->wt_protocol != NULL) {
-                        /* Duplicate content type! */
-                        bytes = 0;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         bytes = h3zero_parse_qpack_header_value_string(bytes, decoded,
@@ -570,7 +575,14 @@ uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
         }
     }
 
+    free(allocated);
     return bytes;
+}
+
+uint8_t * h3zero_parse_qpack_header_value(uint8_t * bytes, uint8_t * bytes_max,
+    http_header_enum_t header, h3zero_header_parts_t * parts)
+{
+    return h3zero_parse_qpack_header_value_ex(bytes, bytes_max, header, parts, 0);
 }
 
 int h3zero_get_interesting_header_type(uint8_t * name, size_t name_length, int is_huffman)
@@ -609,8 +621,8 @@ int h3zero_get_interesting_header_type(uint8_t * name, size_t name_length, int i
     return val;
 }
 
-uint8_t * h3zero_parse_qpack_header_frame(uint8_t * bytes, uint8_t * bytes_max, 
-    h3zero_header_parts_t * parts)
+uint8_t * h3zero_parse_qpack_header_frame_ex(uint8_t * bytes, uint8_t * bytes_max,
+    h3zero_header_parts_t * parts, int allow_duplicates)
 {
     memset(parts, 0, sizeof(h3zero_header_parts_t));
 
@@ -635,7 +647,7 @@ uint8_t * h3zero_parse_qpack_header_frame(uint8_t * bytes, uint8_t * bytes_max,
 
             bytes = h3zero_qpack_int_decode(bytes, bytes_max, 0x3F, &s_index);
 
-            if (s_index >= h3zero_qpack_nb_static) {
+            if (bytes == NULL || s_index >= h3zero_qpack_nb_static) {
                 /* Index out of range */
                 bytes = NULL;
             }
@@ -643,8 +655,7 @@ uint8_t * h3zero_parse_qpack_header_frame(uint8_t * bytes, uint8_t * bytes_max,
                 switch (qpack_static[s_index].header) {
                 case http_pseudo_header_method:
                     if (parts->method != h3zero_method_none) {
-                        /* Duplicate method! */
-                        bytes = 0;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         parts->method = (h3zero_method_enum) qpack_static[s_index].enum_as_int;
@@ -652,8 +663,7 @@ uint8_t * h3zero_parse_qpack_header_frame(uint8_t * bytes, uint8_t * bytes_max,
                     break;
                 case http_header_content_type:
                     if (parts->content_type != h3zero_content_type_none) {
-                        /* Duplicate content type! */
-                        bytes = NULL;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         parts->content_type = (h3zero_content_type_enum)qpack_static[s_index].enum_as_int;
@@ -661,8 +671,7 @@ uint8_t * h3zero_parse_qpack_header_frame(uint8_t * bytes, uint8_t * bytes_max,
                     break;
                 case http_pseudo_header_status:
                     if (parts->status != 0) {
-                        /* Duplicate content type! */
-                        bytes = NULL;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         parts->status = qpack_static[s_index].enum_as_int;
@@ -670,8 +679,7 @@ uint8_t * h3zero_parse_qpack_header_frame(uint8_t * bytes, uint8_t * bytes_max,
                     break;
                 case http_pseudo_header_path:
                     if (parts->path != NULL) {
-                        /* Duplicate path! */
-                        bytes = NULL;
+                        if (!allow_duplicates) bytes = NULL;
                     }
                     else {
                         parts->path_length = strlen(qpack_static[s_index].content);
@@ -706,8 +714,8 @@ uint8_t * h3zero_parse_qpack_header_frame(uint8_t * bytes, uint8_t * bytes_max,
                     /* Index out of range */
                     bytes = NULL;
                 } else {
-                    bytes = h3zero_parse_qpack_header_value(bytes, bytes_max,
-                        qpack_static[s_index].header, parts);
+                    bytes = h3zero_parse_qpack_header_value_ex(bytes, bytes_max,
+                        qpack_static[s_index].header, parts, allow_duplicates);
                 }
             }
         }
@@ -724,8 +732,8 @@ uint8_t * h3zero_parse_qpack_header_frame(uint8_t * bytes, uint8_t * bytes_max,
                 else {
                     http_header_enum_t header_type = h3zero_get_interesting_header_type(bytes, (size_t)n_length, is_huffman);
                     bytes += n_length;
-                    bytes = h3zero_parse_qpack_header_value(bytes, bytes_max,
-                        header_type, parts);
+                    bytes = h3zero_parse_qpack_header_value_ex(bytes, bytes_max,
+                        header_type, parts, allow_duplicates);
                 }
             }
         }
@@ -735,6 +743,175 @@ uint8_t * h3zero_parse_qpack_header_frame(uint8_t * bytes, uint8_t * bytes_max,
         }
     }
 
+    return bytes;
+}
+
+uint8_t * h3zero_parse_qpack_header_frame(uint8_t * bytes, uint8_t * bytes_max,
+    h3zero_header_parts_t * parts)
+{
+    return h3zero_parse_qpack_header_frame_ex(bytes, bytes_max, parts, 0);
+}
+
+static const char* const h3zero_static_header_names[http_header_max] = {
+    [http_pseudo_header_authority] = ":authority",
+    [http_pseudo_header_path] = ":path",
+    [http_header_age] = "age",
+    [http_header_content_disposition] = "content-disposition",
+    [http_header_content_length] = "content-length",
+    [http_header_cookie] = "cookie",
+    [http_header_date] = "date",
+    [http_header_etag] = "etag",
+    [http_header_if_modified_since] = "if-modified-since",
+    [http_header_if_none_match] = "if-none-match",
+    [http_header_last_modified] = "last-modified",
+    [http_header_link] = "link",
+    [http_header_location] = "location",
+    [http_header_referer] = "referer",
+    [http_header_set_cookie] = "set-cookie",
+    [http_pseudo_header_method] = ":method",
+    [http_pseudo_header_scheme] = ":scheme",
+    [http_pseudo_header_status] = ":status",
+    [http_pseudo_header_protocol] = ":protocol",
+    [http_header_accept] = "accept",
+    [http_header_accept_encoding] = "accept-encoding",
+    [http_header_accept_ranges] = "accept-ranges",
+    [http_header_access_control_allow_headers] = "access-control-allow-headers",
+    [http_header_access_control_allow_origin] = "access-control-allow-origin",
+    [http_header_cache_control] = "cache-control",
+    [http_header_content_encoding] = "content-encoding",
+    [http_header_content_type] = "content-type",
+    [http_header_range] = "range",
+    [http_header_strict_transport_security] = "strict-transport-security",
+    [http_header_vary] = "vary",
+    [http_header_x_content_type_options] = "x-content-type-options",
+    [http_header_x_xss_protection] = "x-xss-protection",
+    [http_header_accept_language] = "accept-language",
+    [http_header_access_control_allow_credentials] = "access-control-allow-credentials",
+    [http_header_access_control_allow_methods] = "access-control-allow-methods",
+    [http_header_access_control_expose_headers] = "access-control-expose-headers",
+    [http_header_access_control_request_headers] = "access-control-request-headers",
+    [http_header_access_control_request_method] = "access-control-request-method",
+    [http_header_alt_svc] = "alt-svc",
+    [http_header_authorization] = "authorization",
+    [http_header_content_security_policy] = "content-security-policy",
+    [http_header_early_data] = "early-data",
+    [http_header_expect_ct] = "expect-ct",
+    [http_header_forwarded] = "forwarded",
+    [http_header_if_range] = "if-range",
+    [http_header_origin] = "origin",
+    [http_header_purpose] = "purpose",
+    [http_header_server] = "server",
+    [http_header_timing_allow_origin] = "timing-allow-origin",
+    [http_header_upgrade_insecure_requests] = "upgrade-insecure-requests",
+    [http_header_user_agent] = "user-agent",
+    [http_header_x_forwarded_for] = "x-forwarded-for",
+    [http_header_x_frame_options] = "x-frame-options",
+    [http_header_wt_available_protocols] = H3ZERO_WT_AVAILABLE_PROTOCOLS,
+    [http_header_wt_protocol] = H3ZERO_WT_PROTOCOL
+};
+
+static uint8_t* h3zero_decode_field_string(uint8_t* bytes, uint8_t* bytes_max,
+    uint8_t mask, uint8_t huffman_bit, const uint8_t** value, size_t* length,
+    uint8_t** allocated)
+{
+    uint64_t encoded_length;
+    int huffman;
+
+    if (bytes == NULL || bytes >= bytes_max) {
+        return NULL;
+    }
+    huffman = (*bytes & huffman_bit) != 0;
+    bytes = h3zero_qpack_int_decode(bytes, bytes_max, mask, &encoded_length);
+    if (bytes == NULL || encoded_length > (uint64_t)(bytes_max - bytes) ||
+        encoded_length > H3ZERO_MAX_FIELD_SECTION_SIZE) {
+        return NULL;
+    }
+    if (huffman) {
+        size_t capacity = (size_t)encoded_length * 8 / 5 + 1;
+        if (capacity > H3ZERO_MAX_FIELD_SECTION_SIZE) {
+            capacity = H3ZERO_MAX_FIELD_SECTION_SIZE;
+        }
+        *allocated = malloc(capacity);
+        if (*allocated == NULL || hzero_qpack_huffman_decode(bytes, bytes + encoded_length,
+            *allocated, capacity, length) != 0) {
+            return NULL;
+        }
+        *value = *allocated;
+    }
+    else {
+        *value = bytes;
+        *length = (size_t)encoded_length;
+    }
+    return bytes + encoded_length;
+}
+
+uint8_t* h3zero_parse_qpack_header_fields(uint8_t* bytes, uint8_t* bytes_max,
+    h3zero_header_field_cb_fn callback, void* callback_ctx, int is_trailer)
+{
+    uint64_t delta_base;
+    if (bytes == NULL || bytes >= bytes_max || bytes[0] != 0 || callback == NULL) {
+        return NULL;
+    }
+    bytes = h3zero_qpack_int_decode(bytes + 1, bytes_max, 0x7f, &delta_base);
+    while (bytes != NULL && bytes < bytes_max) {
+        const uint8_t* name = NULL;
+        const uint8_t* value = NULL;
+        uint8_t* name_allocated = NULL;
+        uint8_t* value_allocated = NULL;
+        size_t name_length = 0;
+        size_t value_length = 0;
+        uint8_t type = *bytes;
+
+        if ((type & 0xc0) == 0xc0 || (type & 0xd0) == 0x50) {
+            uint64_t index;
+            int indexed = (type & 0xc0) == 0xc0;
+            bytes = h3zero_qpack_int_decode(bytes, bytes_max, indexed ? 0x3f : 0x0f, &index);
+            if (bytes == NULL || index >= h3zero_qpack_nb_static ||
+                qpack_static[index].header <= http_header_unknown ||
+                qpack_static[index].header >= http_header_max) {
+                bytes = NULL;
+            }
+            else {
+                const char* static_name = h3zero_static_header_names[qpack_static[index].header];
+                if (static_name == NULL) {
+                    bytes = NULL;
+                }
+                else {
+                    name = (const uint8_t*)static_name;
+                    name_length = strlen(static_name);
+                    if (indexed) {
+                        const char* static_value = qpack_static[index].content;
+                        if (static_value == NULL) {
+                            static_value = "";
+                        }
+                        value = (const uint8_t*)static_value;
+                        value_length = strlen(static_value);
+                    }
+                    else {
+                        bytes = h3zero_decode_field_string(bytes, bytes_max, 0x7f, 0x80,
+                            &value, &value_length, &value_allocated);
+                    }
+                }
+            }
+        }
+        else if ((type & 0xe0) == 0x20) {
+            bytes = h3zero_decode_field_string(bytes, bytes_max, 0x07, 0x08,
+                &name, &name_length, &name_allocated);
+            if (bytes != NULL) {
+                bytes = h3zero_decode_field_string(bytes, bytes_max, 0x7f, 0x80,
+                    &value, &value_length, &value_allocated);
+            }
+        }
+        else {
+            bytes = NULL;
+        }
+        if (bytes != NULL && callback(name, name_length, value, value_length,
+            is_trailer, callback_ctx) != 0) {
+            bytes = NULL;
+        }
+        free(name_allocated);
+        free(value_allocated);
+    }
     return bytes;
 }
 
@@ -1862,6 +2039,7 @@ int hzero_qpack_huffman_decode(uint8_t* bytes, uint8_t* bytes_max, uint8_t* deco
     size_t decoded_index = 0;
     int index = 0;
     int was_all_ones = 1;
+    int trailing_bits = 0;
 
     while (1) {
         /* Refill the registry */
@@ -1886,6 +2064,7 @@ int hzero_qpack_huffman_decode(uint8_t* bytes, uint8_t* bytes_max, uint8_t* deco
             bit = (val_in >> 63) & 1;
             val_in <<= 1;
             bits_in--;
+            trailing_bits++;
             if (bit) {
                 index += h3zero_qpack_huffman_val[index];
             }
@@ -1894,7 +2073,8 @@ int hzero_qpack_huffman_decode(uint8_t* bytes, uint8_t* bytes_max, uint8_t* deco
                 was_all_ones = 0;
             }
             if (index >= 512) {
-                /* End of string marked by all ones */
+                /* The EOS symbol is not valid in an encoded string. */
+                was_all_ones = 0;
                 break;
             }
         }
@@ -1902,6 +2082,7 @@ int hzero_qpack_huffman_decode(uint8_t* bytes, uint8_t* bytes_max, uint8_t* deco
             decoded[decoded_index++] = h3zero_qpack_huffman_val[index];
             index = 0;
             was_all_ones = 1;
+            trailing_bits = 0;
         }
         else
         {
@@ -1912,7 +2093,7 @@ int hzero_qpack_huffman_decode(uint8_t* bytes, uint8_t* bytes_max, uint8_t* deco
     }
 
     /* Error if break and not all ones before that */
-    if (!was_all_ones) {
+    if (!was_all_ones || trailing_bits > 7) {
         ret = -1;
     }
 

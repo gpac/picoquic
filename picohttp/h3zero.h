@@ -217,6 +217,22 @@ typedef struct st_h3zero_header_parts_t {
     unsigned int path_is_huffman : 1;
 } h3zero_header_parts_t;
 
+/* Field data is valid only during the callback. A nonzero return aborts
+ * decoding. Earlier callbacks may already have run if a later field fails.
+ */
+typedef int (*h3zero_header_field_cb_fn)(const uint8_t* name, size_t name_length,
+    const uint8_t* value, size_t value_length, int is_trailer, void* context);
+
+typedef enum {
+    h3zero_header_section_initial,
+    h3zero_header_section_informational,
+    h3zero_header_section_trailer
+} h3zero_header_section_type_t;
+
+/* Called once after all fields in a successfully decoded section, including
+ * empty sections. A nonzero return aborts with H3ZERO_INTERNAL_ERROR. */
+typedef int (*h3zero_header_section_cb_fn)(h3zero_header_section_type_t type, void* context);
+
 /* Setting codes.
 * This list includes the "extension" settings for datagrams and web
 * transport, because we want to have common functions for coding and
@@ -269,6 +285,15 @@ uint8_t* h3zero_qpack_literal_plus_ref_encode(uint8_t* bytes, uint8_t* bytes_max
 
 uint8_t * h3zero_parse_qpack_header_frame(uint8_t * bytes, uint8_t * bytes_max,
     h3zero_header_parts_t * parts);
+/* With allow_duplicates, do not reject repeated recognized fields; parts
+ * retain the legacy parser's selected-field representation. */
+uint8_t * h3zero_parse_qpack_header_frame_ex(uint8_t * bytes, uint8_t * bytes_max,
+    h3zero_header_parts_t * parts, int allow_duplicates);
+/* Decode all fields from a static-table QPACK field section. Returns NULL on
+ * malformed input or callback failure; previously delivered fields are not
+ * rolled back. Dynamic-table references are not supported. */
+uint8_t* h3zero_parse_qpack_header_fields(uint8_t* bytes, uint8_t* bytes_max,
+    h3zero_header_field_cb_fn callback, void* callback_ctx, int is_trailer);
 uint8_t* h3zero_qpack_code_encode(uint8_t* bytes, uint8_t* bytes_max, uint8_t prefix, uint8_t mask, uint64_t code);
 uint8_t * h3zero_create_request_header_frame(uint8_t * bytes, uint8_t * bytes_max,
     uint8_t const * path, size_t path_length, char const * host);
@@ -300,6 +325,16 @@ uint8_t* h3zero_create_bad_method_header_frame_ex(uint8_t* bytes, uint8_t* bytes
 
 typedef struct st_h3zero_data_stream_state_t {
     struct st_h3zero_callback_ctx_t* h3_ctx;
+    /* Optional; set before parsing the first HEADERS frame. The field
+     * callback receives all fields, including repeated recognized fields.
+     * The header and trailer parts retain the legacy selected-field
+     * representation; use the field callback for the complete field list.
+     * HTTP field validity, including pseudo-header rules, is the caller's
+     * responsibility. Field callbacks may precede a later decoding error. */
+    h3zero_header_field_cb_fn header_field_callback;
+    void* header_field_callback_ctx;
+    h3zero_header_section_cb_fn header_section_callback;
+    void* header_section_callback_ctx;
     h3zero_header_parts_t header;
     h3zero_header_parts_t trailer;
     uint64_t stream_type;
@@ -330,7 +365,11 @@ typedef struct st_h3zero_data_stream_state_t {
 * - Reading header frame: obtaining the bytes of the data frame.
 *   When all bytes are obtained, the header is parsed and the header
 *   structure is documented. State moves back to initial, with header-read
-*   flag set. Having two frame headers before a data frame is a bug.
+*   flag set. With a field or section callback, informational response headers are
+*   delivered then discarded, and trailers may follow without a DATA frame.
+*   Without a callback, two HEADERS frames before DATA remain an error.
+*   The optional section callback marks completion even for an empty section.
+*   No completion callback runs after a parse error or field callback failure.
 * - Reading data frame: the frame header indicated a data frame of
 *   length N. Treat the following N bytes as data.
 *

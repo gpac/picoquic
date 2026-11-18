@@ -532,6 +532,16 @@ typedef int (*picoquic_stream_data_cb_fn)(picoquic_cnx_t* cnx,
     uint64_t stream_id, uint8_t* bytes, size_t length,
     picoquic_call_back_event_t fin_or_event, void* callback_ctx, void * stream_ctx);
 
+/* Notification that the contiguous acknowledged prefix of a send stream has
+ * advanced. acknowledged_offset excludes FIN and is an absolute stream
+ * offset, not a byte count. Out-of-order ACKs are reported only after gaps
+ * are filled. Acknowledgement does not imply application-level consumption.
+ * The callback must not delete the connection or stream while it runs.
+ */
+typedef void (*picoquic_stream_ack_cb_fn)(picoquic_cnx_t* cnx,
+    uint64_t stream_id, uint64_t acknowledged_offset,
+    void* callback_ctx, void* stream_ctx);
+
 /* Callback from the TLS stack upon receiving a list of proposed ALPN in the Client Hello
  * The stack passes a <list> of io <count> vectors (base, len) each containing a proposed
  * ALPN. The implementation returns the index of the selected ALPN, or a value >= count
@@ -807,7 +817,9 @@ void picoquic_set_null_verifier(picoquic_quic_t* quic);
  * picoquic_start_client_cnx refuses the connection instead of proceeding unverified. */
 void picoquic_set_client_cert_verification_policy(picoquic_quic_t* quic, int is_strict);
 
-/* Set the TLS private key(DER format) for the QUIC context. The caller is responsible for cleaning up the pointer. */
+/* Set a DER private key before creating connections. The input remains owned by
+ * the caller. Returns zero on success; on error the previous key is retained.
+ * The selected crypto provider must support DER key loading. */
 int picoquic_set_tls_key(picoquic_quic_t* quic, const uint8_t* data, size_t len);
 
 /* Set the verify certificate callback and context. */
@@ -1346,6 +1358,12 @@ int picoquic_is_cnx_backlog_empty(picoquic_cnx_t* cnx);
 
 void picoquic_set_callback(picoquic_cnx_t* cnx,
     picoquic_stream_data_cb_fn callback_fn, void* callback_ctx);
+
+/* Optional per-connection ACK notification. Install before sending stream data;
+ * previous progress is not replayed. Set callback_fn to NULL to disable it.
+ */
+void picoquic_set_stream_ack_callback(picoquic_cnx_t* cnx,
+    picoquic_stream_ack_cb_fn callback_fn, void* callback_ctx);
 
 picoquic_stream_data_cb_fn picoquic_get_default_callback_function(picoquic_quic_t * quic);
 

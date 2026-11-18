@@ -150,6 +150,7 @@ set(PICOQUIC_CORE_HEADERS
      picoquic/picoquic_af_xdp.h
      picoquic/picoquic_config.h
      picoquic/picoquic_lb.h
+     picoquic/picoquic_set_textlog.h
      picoquic/picoquic_newreno.h
      picoquic/picoquic_cubic.h
      picoquic/picoquic_bbr.h
@@ -175,7 +176,6 @@ set(PICOQUIC_CORE_HEADERS_PRIVATE
     picoquic/picoquic_neigh.h
     picoquic/picoquic_picotls.h
     picoquic/picoquic_set_binlog.h
-    picoquic/picoquic_set_textlog.h
     picoquic/picoquic_unified_log.h
     picoquic/picorbtree.h
     picoquic/picosplay.h
@@ -861,6 +861,9 @@ if(PICOQUIC_FETCH_PTLS)
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(DIRECTORY "${picotls_SOURCE_DIR}/include/"
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        FILES_MATCHING PATTERN "*.h")
 else()
     set(LIB_PATH "${CMAKE_INSTALL_LIBDIR}/${_picoquic_lib_prefix}picoquic-core${_picoquic_lib_suffix}" CACHE PATH "Path of library file")
 endif()

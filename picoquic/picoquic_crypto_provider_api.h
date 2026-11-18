@@ -56,6 +56,7 @@ extern "C" {
 
     void picoquic_register_tls_key_provider_fn(
         picoquic_set_private_key_from_file_t set_private_key_from_file_fn,
+        picoquic_set_tls_key_provider_t set_tls_key_fn,
         picoquic_dispose_sign_certificate_t dispose_sign_certificate_fn,
         picoquic_get_certs_from_file_t get_certs_from_file_fn,
         picoquic_get_public_key_from_private_t get_public_key_from_private_fn);

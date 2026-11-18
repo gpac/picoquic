@@ -541,26 +541,19 @@ int qpack_huffman_base_test(void)
         }
     }
 
-    /* Test a set of valid terminators, up to 7 bytes of 0xFF so the chain reaches the index>=512 EOS test. */
+    /* A whole byte of padding and an EOS symbol are both invalid. */
     for (size_t i = 1; ret == 0 && i < 8; i++) {
         input_length = 0;
         for (size_t l = 0; l < i; l++) {
             input[input_length++] = 0xFF;
         }
 
-        ret = hzero_qpack_huffman_decode(
+        if (hzero_qpack_huffman_decode(
             input,
             input + input_length,
-            data, sizeof(data), &nb_data);
-        if (ret == 0) {
-            if (nb_data != 0) {
-                DBG_PRINTF("Huffman eof test %d bad length (%d vs %d)\n", (int)i,
-                    (int)nb_data, 0);
-                ret = -1;
-            }
-        }
-        else {
-            DBG_PRINTF("Huffman cannot decode eof test %d\n", (int)i);
+            data, sizeof(data), &nb_data) == 0) {
+            DBG_PRINTF("Huffman accepted invalid padding or EOS test %d\n", (int)i);
+            ret = -1;
         }
     }
     return ret;
@@ -1171,6 +1164,428 @@ static int h3zero_parse_qpack_test_one(size_t i, uint8_t * data, size_t data_len
     return ret;
 }
 
+typedef struct st_h3zero_field_test_t {
+    size_t count;
+    int invalid;
+    size_t sections;
+} h3zero_field_test_t;
+
+static int h3zero_informational_section_cb(h3zero_header_section_type_t type, void* context)
+{
+    h3zero_field_test_t* test = (h3zero_field_test_t*)context;
+    const h3zero_header_section_type_t types[] = { h3zero_header_section_informational,
+        h3zero_header_section_initial, h3zero_header_section_trailer };
+    size_t i = test->sections++;
+    if (i >= 3 || type != types[i] || test->count != i + 1) {
+        test->invalid = 1;
+        return -1;
+    }
+    return 0;
+}
+
+static int h3zero_field_test_cb(const uint8_t* name, size_t name_length,
+    const uint8_t* value, size_t value_length, int is_trailer, void* context)
+{
+    h3zero_field_test_t* test = (h3zero_field_test_t*)context;
+    const char* names[] = { ":method", "authorization", "x-custom", "x-custom", "x-tail" };
+    const char* values[] = { "GET", "secret", "value", "value", "done" };
+    size_t i = test->count++;
+    if (i >= 5 || name_length != strlen(names[i]) || value_length != strlen(values[i]) ||
+        memcmp(name, names[i], name_length) != 0 || memcmp(value, values[i], value_length) != 0 ||
+        is_trailer != (i == 4)) {
+        test->invalid = 1;
+        return -1;
+    }
+    return 0;
+}
+
+static int h3zero_field_stream_test(void)
+{
+    uint8_t bytes[128];
+    uint8_t* p = bytes;
+    uint8_t* frame_length;
+    h3zero_data_stream_state_t state = { 0 };
+    h3zero_field_test_t test = { 0 };
+    size_t received = 0;
+    uint64_t error = 0;
+    int ret = 0;
+
+    state.header_field_callback = h3zero_field_test_cb;
+    state.header_field_callback_ctx = &test;
+    *p++ = h3zero_frame_header;
+    frame_length = p++;
+    *p++ = 0;
+    *p++ = 0;
+    *p++ = 0xc0 | H3ZERO_QPACK_CODE_GET;
+    p = h3zero_qpack_literal_plus_ref_encode(p, bytes + sizeof(bytes),
+        84, (const uint8_t*)"secret", 6);
+    p = h3zero_qpack_literal_plus_name_encode(p, bytes + sizeof(bytes),
+        (const uint8_t*)"x-custom", 8, (const uint8_t*)"value", 5);
+    p = h3zero_qpack_literal_plus_name_encode(p, bytes + sizeof(bytes),
+        (const uint8_t*)"x-custom", 8, (const uint8_t*)"value", 5);
+    if (p == NULL || p - frame_length - 1 >= 64) {
+        return -1;
+    }
+    *frame_length = (uint8_t)(p - frame_length - 1);
+    *p++ = h3zero_frame_data;
+    *p++ = 3;
+    memcpy(p, "abc", 3);
+    p += 3;
+    *p++ = h3zero_frame_header;
+    frame_length = p++;
+    *p++ = 0;
+    *p++ = 0;
+    p = h3zero_qpack_literal_plus_name_encode(p, bytes + sizeof(bytes),
+        (const uint8_t*)"x-tail", 6, (const uint8_t*)"done", 4);
+    if (p == NULL || p - frame_length - 1 >= 64) {
+        return -1;
+    }
+    *frame_length = (uint8_t)(p - frame_length - 1);
+
+    for (uint8_t* cursor = bytes; cursor < p && ret == 0;) {
+        uint8_t* end = cursor + 1;
+        size_t available = 0;
+        uint8_t* next = h3zero_parse_data_stream(cursor, end, &state, &available, &error);
+        if (next == NULL || next + available != end ||
+            (available && (available != 1 || received >= 3 || *next != "abc"[received]))) {
+            ret = -1;
+        }
+        else {
+            received += available;
+            cursor = next + available;
+        }
+    }
+    if (test.invalid || test.count != 5 || received != 3 || error != 0) {
+        ret = -1;
+    }
+    h3zero_delete_data_stream_state(&state);
+    return ret;
+}
+
+static int h3zero_long_field_cb(const uint8_t* name, size_t name_length,
+    const uint8_t* value, size_t value_length, int is_trailer, void* context)
+{
+    int* count = (int*)context;
+    if (name_length != 14 || memcmp(name, "content-length", 14) != 0 ||
+        value_length != 320 || is_trailer) {
+        return -1;
+    }
+    for (size_t i = 0; i < value_length; i++) {
+        if (value[i] != '0') {
+            return -1;
+        }
+    }
+    (*count)++;
+    return 0;
+}
+
+static int h3zero_huffman_field_test(void)
+{
+    uint8_t bytes[256];
+    uint8_t* p = bytes;
+    uint8_t* next;
+    h3zero_data_stream_state_t state = { 0 };
+    uint64_t error = 0;
+    size_t available = 0;
+    int count = 0;
+    int ret = 0;
+
+    p = picoquic_frames_varint_encode(p, bytes + sizeof(bytes), h3zero_frame_header);
+    p = picoquic_frames_varint_encode(p, bytes + sizeof(bytes), 205);
+    if (p == NULL) {
+        return -1;
+    }
+    *p++ = 0;
+    *p++ = 0;
+    *p++ = 0x54; /* static name reference: content-length */
+    *p++ = 0xff;
+    *p++ = 73; /* 200 encoded bytes */
+    memset(p, 0, 200); /* 320 Huffman-encoded zero digits */
+    p += 200;
+    state.header_field_callback = h3zero_long_field_cb;
+    state.header_field_callback_ctx = &count;
+    next = h3zero_parse_data_stream(bytes, p, &state, &available, &error);
+    if (next != p || available != 0 || error != 0 || count != 1) {
+        ret = -1;
+    }
+    h3zero_delete_data_stream_state(&state);
+    return ret;
+}
+
+static int h3zero_invalid_huffman_field_test(void)
+{
+    uint8_t bad_padding[] = { 0, 0, 0x21, 'x', 0x81, 0xff };
+    uint8_t eos[] = { 0, 0, 0x21, 'x', 0x84, 0xff, 0xff, 0xff, 0xff };
+    h3zero_field_test_t test = { 0 };
+    if (h3zero_parse_qpack_header_fields(bad_padding, bad_padding + sizeof(bad_padding),
+        h3zero_field_test_cb, &test, 0) != NULL ||
+        h3zero_parse_qpack_header_fields(eos, eos + sizeof(eos),
+            h3zero_field_test_cb, &test, 0) != NULL || test.count != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+typedef struct st_h3zero_expected_field_t {
+    const char* name;
+    const char* value;
+    size_t count;
+} h3zero_expected_field_t;
+
+static int h3zero_expected_field_cb(const uint8_t* name, size_t name_length,
+    const uint8_t* value, size_t value_length, int is_trailer, void* context)
+{
+    h3zero_expected_field_t* expected = (h3zero_expected_field_t*)context;
+    expected->count++;
+    return is_trailer || name_length != strlen(expected->name) ||
+        value_length != strlen(expected->value) ||
+        memcmp(name, expected->name, name_length) != 0 ||
+        memcmp(value, expected->value, value_length) != 0;
+}
+
+static int h3zero_encoded_field_test(void)
+{
+    uint8_t huffman[] = { 0, 0, 0x2f, 0, 0xce, 0x64, 0x97, 0x75, 0x65, 0x2c, 0x9f,
+        0x84, 0x60, 0x22, 0x65, 0xaf };
+    uint8_t static_empty[] = { 0, 0, 0xc0 };
+    uint8_t static_extended[] = { 0, 0, 0xff, 35 };
+    uint8_t truncated[] = { 0, 0, 0x21, 'x', 2, 'a' };
+    h3zero_expected_field_t expected = { "LiteSpeed", "/1234", 0 };
+    if (h3zero_parse_qpack_header_fields(huffman, huffman + sizeof(huffman),
+        h3zero_expected_field_cb, &expected, 0) != huffman + sizeof(huffman) ||
+        expected.count != 1) {
+        return -1;
+    }
+    expected.name = ":authority";
+    expected.value = "";
+    expected.count = 0;
+    if (h3zero_parse_qpack_header_fields(static_empty, static_empty + sizeof(static_empty),
+        h3zero_expected_field_cb, &expected, 0) != static_empty + sizeof(static_empty) ||
+        expected.count != 1) {
+        return -1;
+    }
+    expected.name = "x-frame-options";
+    expected.value = "sameorigin";
+    expected.count = 0;
+    if (h3zero_parse_qpack_header_fields(static_extended, static_extended + sizeof(static_extended),
+        h3zero_expected_field_cb, &expected, 0) != static_extended + sizeof(static_extended) ||
+        expected.count != 1) {
+        return -1;
+    }
+    expected.count = 0;
+    if (h3zero_parse_qpack_header_fields(truncated, truncated + sizeof(truncated),
+        h3zero_expected_field_cb, &expected, 0) != NULL || expected.count != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int h3zero_field_callback_error_test(void)
+{
+    uint8_t bytes[] = { h3zero_frame_header, 3, 0, 0, 0xd1 };
+    h3zero_data_stream_state_t state = { 0 };
+    h3zero_expected_field_t expected = { ":status", "200", 0 };
+    size_t available = 0;
+    uint64_t error = 0;
+    state.header_field_callback = h3zero_expected_field_cb;
+    state.header_field_callback_ctx = &expected;
+    uint8_t* result = h3zero_parse_data_stream(bytes, bytes + sizeof(bytes), &state, &available, &error);
+    h3zero_delete_data_stream_state(&state);
+    return result == NULL && error == H3ZERO_INTERNAL_ERROR && expected.count == 1 ? 0 : -1;
+}
+
+static int h3zero_informational_field_cb(const uint8_t* name, size_t name_length,
+    const uint8_t* value, size_t value_length, int is_trailer, void* context)
+{
+    h3zero_field_test_t* test = (h3zero_field_test_t*)context;
+    const char* names[] = { ":status", ":status", "x-tail" };
+    const char* values[] = { "103", "200", "done" };
+    size_t i = test->count++;
+    if (i >= 3 || name_length != strlen(names[i]) || value_length != strlen(values[i]) ||
+        memcmp(name, names[i], name_length) != 0 || memcmp(value, values[i], value_length) != 0 ||
+        is_trailer != (i == 2)) {
+        test->invalid = 1;
+        return -1;
+    }
+    return 0;
+}
+
+static int h3zero_informational_and_empty_trailer_test(void)
+{
+    uint8_t bytes[64] = { h3zero_frame_header, 3, 0, 0, 0xd8,
+        h3zero_frame_header, 3, 0, 0, 0xd9, h3zero_frame_header, 0, 0, 0 };
+    uint8_t* p = h3zero_qpack_literal_plus_name_encode(bytes + 14, bytes + sizeof(bytes),
+        (const uint8_t*)"x-tail", 6, (const uint8_t*)"done", 4);
+    h3zero_data_stream_state_t state = { 0 };
+    h3zero_field_test_t test = { 0 };
+    uint64_t error = 0;
+    int ret = 0;
+    if (p == NULL || p - (bytes + 12) >= 64) {
+        return -1;
+    }
+    bytes[11] = (uint8_t)(p - (bytes + 12));
+    state.header_field_callback = h3zero_informational_field_cb;
+    state.header_field_callback_ctx = &test;
+    state.header_section_callback = h3zero_informational_section_cb;
+    state.header_section_callback_ctx = &test;
+    for (uint8_t* cursor = bytes; cursor < p;) {
+        size_t available = 0;
+        uint8_t* next = h3zero_parse_data_stream(cursor, cursor + 1, &state, &available, &error);
+        if (next != cursor + 1 || available != 0) {
+            ret = -1;
+            break;
+        }
+        cursor = next;
+    }
+    if (test.invalid || test.count != 3 || test.sections != 3 || error != 0 || !state.trailer_found) {
+        ret = -1;
+    }
+    h3zero_delete_data_stream_state(&state);
+    return ret;
+}
+
+typedef struct st_h3zero_section_test_t {
+    size_t count;
+    int fail;
+    int invalid;
+} h3zero_section_test_t;
+
+static int h3zero_section_test_cb(h3zero_header_section_type_t type, void* context)
+{
+    h3zero_section_test_t* test = (h3zero_section_test_t*)context;
+    test->count++;
+    if (type != h3zero_header_section_initial) {
+        test->invalid = 1;
+    }
+    return test->fail;
+}
+
+static int h3zero_section_completion_test(void)
+{
+    uint8_t empty[] = { h3zero_frame_header, 2, 0, 0 };
+    uint8_t malformed[] = { h3zero_frame_header, 4, 0, 0, 0xc0, 0xff };
+    uint8_t too_short[] = { h3zero_frame_header, 0 };
+    uint8_t field[] = { h3zero_frame_header, 3, 0, 0, 0xd1 };
+    h3zero_data_stream_state_t state = { 0 };
+    h3zero_section_test_t test = { 0, 0, 0 };
+    h3zero_expected_field_t expected = { ":status", "200", 0 };
+    uint64_t error = 0;
+    size_t available = 0;
+    int ret = 0;
+
+    state.header_section_callback = h3zero_section_test_cb;
+    state.header_section_callback_ctx = &test;
+    if (h3zero_parse_data_stream(empty, empty + sizeof(empty) - 1, &state, &available, &error) != empty + sizeof(empty) - 1 ||
+        available != 0 || error != 0 || test.count != 0 ||
+        h3zero_parse_data_stream(empty + sizeof(empty) - 1, empty + sizeof(empty), &state, &available, &error) != empty + sizeof(empty) ||
+        available != 0 || error != 0 || test.count != 1 || test.invalid || !state.header_found) {
+        ret = -1;
+    }
+    h3zero_delete_data_stream_state(&state);
+
+    memset(&state, 0, sizeof(state));
+    memset(&test, 0, sizeof(test));
+    state.header_section_callback = h3zero_section_test_cb;
+    state.header_section_callback_ctx = &test;
+    if (h3zero_parse_data_stream(malformed, malformed + sizeof(malformed), &state, &available, &error) != NULL ||
+        error != H3ZERO_FRAME_ERROR || test.count != 0) {
+        ret = -1;
+    }
+    h3zero_delete_data_stream_state(&state);
+
+    memset(&state, 0, sizeof(state));
+    error = 0;
+    state.header_section_callback = h3zero_section_test_cb;
+    state.header_section_callback_ctx = &test;
+    if (h3zero_parse_data_stream(too_short, too_short + sizeof(too_short), &state, &available, &error) != NULL ||
+        error != H3ZERO_FRAME_ERROR || test.count != 0) {
+        ret = -1;
+    }
+    h3zero_delete_data_stream_state(&state);
+
+    memset(&state, 0, sizeof(state));
+    error = 0;
+    state.header_field_callback = h3zero_expected_field_cb;
+    state.header_field_callback_ctx = &expected;
+    state.header_section_callback = h3zero_section_test_cb;
+    state.header_section_callback_ctx = &test;
+    if (h3zero_parse_data_stream(field, field + sizeof(field), &state, &available, &error) != NULL ||
+        error != H3ZERO_INTERNAL_ERROR || expected.count != 1 || test.count != 0) {
+        ret = -1;
+    }
+    h3zero_delete_data_stream_state(&state);
+
+    memset(&state, 0, sizeof(state));
+    test.fail = 1;
+    error = 0;
+    state.header_section_callback = h3zero_section_test_cb;
+    state.header_section_callback_ctx = &test;
+    if (h3zero_parse_data_stream(empty, empty + sizeof(empty), &state, &available, &error) != NULL ||
+        error != H3ZERO_INTERNAL_ERROR || test.count != 1 || test.invalid) {
+        ret = -1;
+    }
+    h3zero_delete_data_stream_state(&state);
+
+    return ret;
+}
+
+static int h3zero_repeated_known_field_cb(const uint8_t* name, size_t name_length,
+    const uint8_t* value, size_t value_length, int is_trailer, void* context)
+{
+    h3zero_field_test_t* test = (h3zero_field_test_t*)context;
+    const char* names[] = { "range", "range", "content-type", "content-type" };
+    const char* values[] = { "bytes=0-9", "bytes=10-19", "text/plain", "text/html; charset=utf-8" };
+    size_t i = test->count++;
+    if (i >= 4 || is_trailer || name_length != strlen(names[i]) ||
+        value_length != strlen(values[i]) || memcmp(name, names[i], name_length) != 0 ||
+        memcmp(value, values[i], value_length) != 0) {
+        test->invalid = 1;
+        return -1;
+    }
+    return 0;
+}
+
+static int h3zero_repeated_known_field_test(void)
+{
+    uint8_t bytes[128] = { h3zero_frame_header, 0, 0, 0 };
+    uint8_t* p = h3zero_qpack_literal_plus_name_encode(bytes + 4, bytes + sizeof(bytes),
+        (const uint8_t*)"range", 5, (const uint8_t*)"bytes=0-9", 9);
+    h3zero_data_stream_state_t state = { 0 };
+    h3zero_field_test_t test = { 0 };
+    uint64_t error = 0;
+    size_t available = 0;
+    int ret = 0;
+    if (p != NULL) {
+        p = h3zero_qpack_literal_plus_name_encode(p, bytes + sizeof(bytes),
+            (const uint8_t*)"range", 5, (const uint8_t*)"bytes=10-19", 11);
+    }
+    if (p == NULL || p + 2 > bytes + sizeof(bytes) || p + 2 - bytes - 2 >= 64) {
+        return -1;
+    }
+    *p++ = 0xc0 | 53;
+    *p++ = 0xc0 | 52;
+    bytes[1] = (uint8_t)(p - bytes - 2);
+    state.header_field_callback = h3zero_repeated_known_field_cb;
+    state.header_field_callback_ctx = &test;
+    if (h3zero_parse_data_stream(bytes, p, &state, &available, &error) != p ||
+        available != 0 || error != 0 || test.invalid || test.count != 4 ||
+        state.header.range_length != 9 || state.header.range == NULL ||
+        memcmp(state.header.range, "bytes=0-9", 9) != 0 ||
+        state.header.content_type != h3zero_content_type_text_plain) {
+        ret = -1;
+    }
+    h3zero_delete_data_stream_state(&state);
+
+    memset(&state, 0, sizeof(state));
+    error = 0;
+    if (h3zero_parse_data_stream(bytes, p, &state, &available, &error) != NULL ||
+        error != H3ZERO_FRAME_ERROR) {
+        ret = -1;
+    }
+    h3zero_delete_data_stream_state(&state);
+    return ret;
+}
+
 int h3zero_parse_qpack_test(void)
 {
     int ret = 0;
@@ -1183,6 +1598,30 @@ int h3zero_parse_qpack_test(void)
         }
     }
 
+    if (ret == 0) {
+        ret = h3zero_field_stream_test();
+    }
+    if (ret == 0) {
+        ret = h3zero_huffman_field_test();
+    }
+    if (ret == 0) {
+        ret = h3zero_invalid_huffman_field_test();
+    }
+    if (ret == 0) {
+        ret = h3zero_encoded_field_test();
+    }
+    if (ret == 0) {
+        ret = h3zero_field_callback_error_test();
+    }
+    if (ret == 0) {
+        ret = h3zero_informational_and_empty_trailer_test();
+    }
+    if (ret == 0) {
+        ret = h3zero_repeated_known_field_test();
+    }
+    if (ret == 0) {
+        ret = h3zero_section_completion_test();
+    }
     return ret;
 }
 

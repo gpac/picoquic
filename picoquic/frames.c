@@ -3690,6 +3690,17 @@ int picoquic_check_frame_needs_repeat(picoquic_cnx_t* cnx, const uint8_t* bytes,
     return ret;
 }
 
+static uint64_t picoquic_contiguous_stream_ack_offset(picoquic_stream_head_t* stream)
+{
+    picoquic_sack_item_t* first = picoquic_sack_first_item(&stream->sack_list);
+    if (first == NULL || first->start_of_sack_range != 0) {
+        return 0;
+    }
+    /* FIN is recorded at sent_offset in the SACK list, but is not a byte. */
+    return (first->end_of_sack_range >= stream->sent_offset) ?
+        stream->sent_offset : first->end_of_sack_range + 1;
+}
+
 int picoquic_process_ack_of_stream_frame(picoquic_cnx_t* cnx, uint8_t* bytes,
     size_t bytes_max, size_t* consumed)
 {
@@ -3710,9 +3721,20 @@ int picoquic_process_ack_of_stream_frame(picoquic_cnx_t* cnx, uint8_t* bytes,
         /* record the ack range for the stream */
         stream = picoquic_find_stream(cnx, stream_id);
         if (stream != NULL) {
+            uint64_t previous_ack_offset = 0;
+            if (cnx->stream_ack_callback_fn != NULL) {
+                previous_ack_offset = picoquic_contiguous_stream_ack_offset(stream);
+            }
             (void)picoquic_update_sack_list(&stream->sack_list,
                 offset, offset + data_length - ((fin) ? 0 : 1), 0);
 
+            if (cnx->stream_ack_callback_fn != NULL) {
+                uint64_t ack_offset = picoquic_contiguous_stream_ack_offset(stream);
+                if (ack_offset > previous_ack_offset) {
+                    cnx->stream_ack_callback_fn(cnx, stream_id, ack_offset,
+                        cnx->stream_ack_callback_ctx, stream->app_stream_ctx);
+                }
+            }
             picoquic_delete_stream_if_closed(cnx, stream);
         }
     }

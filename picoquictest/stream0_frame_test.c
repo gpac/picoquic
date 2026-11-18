@@ -544,6 +544,26 @@ int add_to_stream_fin_only_wakes_cnx_test(void)
                 ret = -1;
             }
         }
+        if (ret == 0) {
+            uint64_t rejected_id = picoquic_get_next_local_stream_id(cnx, 0);
+            picoquic_stream_head_t* stream = picoquic_create_stream(cnx, rejected_id);
+            uint8_t data = 1;
+            if (stream == NULL) {
+                ret = -1;
+            }
+            else {
+                stream->stop_sending_received = 1;
+                if (picoquic_add_to_stream(cnx, rejected_id, &data, 1, 1) == 0 ||
+                    stream->fin_requested || stream->send_queue != NULL) {
+                    ret = -1;
+                }
+                stream->stop_sending_received = 0;
+                if (ret == 0 && (picoquic_add_to_stream(cnx, rejected_id, &data, 1, 1) != 0 ||
+                    !stream->fin_requested || stream->send_queue == NULL)) {
+                    ret = -1;
+                }
+            }
+        }
     }
 
     picoquic_test_delete_minimal_cnx(&quic, &cnx);

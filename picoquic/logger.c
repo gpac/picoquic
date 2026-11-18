@@ -2443,6 +2443,45 @@ struct st_picoquic_unified_logging_t textlog_functions = {
     textlog_flush
 };
 
+static void textlog_stream_close(picoquic_quic_t* quic, void* log_param)
+{
+    (void)quic;
+    (void)log_param;
+}
+
+static picoquic_unified_logging_t textlog_stream_functions = {
+    txtlog_context_free_app_message,
+    textlog_quic_pdu,
+    textlog_stream_close,
+    textlog_app_message,
+    textlog_pdu_ex,
+    textlog_packet,
+    textlog_dropped_packet,
+    textlog_buffered_packet,
+    textlog_outgoing_packet,
+    textlog_packet_lost,
+    textlog_negotiated_alpn,
+    textlog_transport_extension,
+    textlog_tls_ticket,
+    textlog_new_connection,
+    textlog_close_connection,
+    textlog_cc_dump,
+    textlog_flush
+};
+
+int picoquic_set_textlog_stream(picoquic_quic_t* quic, FILE* stream)
+{
+    void* registered;
+    if (quic == NULL || stream == NULL) {
+        return -1;
+    }
+    registered = picoquic_get_log_params(quic, &textlog_stream_functions);
+    if (registered != NULL && registered != stream) {
+        return -1;
+    }
+    return picoquic_register_log_functions(quic, &textlog_stream_functions, stream);
+}
+
 int picoquic_set_textlog(picoquic_quic_t* quic, char const* textlog_file)
 {
     int ret = 0;

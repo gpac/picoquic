@@ -160,6 +160,9 @@ Instead of building picotls separately, you can use an integrated option
    make
 ~~~
 
+When Picoquic is installed with `PICOQUIC_FETCH_PTLS` enabled, the fetched
+Picotls libraries and public headers are installed alongside Picoquic.
+
 AEGIS support is experimental and opt-in: build with `-DWITH_AEGIS=ON`
 to advertise and negotiate AEGIS suites. When supplying these dependencies
 yourself, build picotls and picoquic against the same libaegis headers from

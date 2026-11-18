@@ -36,6 +36,8 @@ cmake -S "$PICOQUIC_ROOT" -B "$BUILD_DIR/picoquic" \
 cmake --build "$BUILD_DIR/picoquic"
 cmake --install "$BUILD_DIR/picoquic"
 
+test -f "$STANDALONE_INSTALL/include/picotls/openssl.h"
+
 echo "==> Building and running install_test against standalone install"
 cmake -S "$SCRIPT_DIR/install_test" -B "$BUILD_DIR/install_test" \
     -DCMAKE_PREFIX_PATH="$STANDALONE_INSTALL" \

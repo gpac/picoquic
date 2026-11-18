@@ -45,6 +45,8 @@ int openssl_cert_test(void)
 }
 #else
 
+#include <openssl/pem.h>
+
 ptls_iovec_t* picoquic_openssl_get_certs_from_file(char const* file_name, size_t* count);
 
 #ifdef _WINDOWS
@@ -90,6 +92,82 @@ static int openssl_cert_test_one(char const * cert_file_name, int expected_count
     return 0;
 }
 
+static int openssl_der_key_test(void)
+{
+    uint64_t simulated_time = 0, loss_mask = 0;
+    picoquic_test_tls_api_ctx_t* ctx = NULL;
+    EVP_PKEY* key = NULL;
+    BIO* bio = NULL;
+    unsigned char* der = NULL;
+    unsigned char* cursor;
+    int der_len = 0;
+    int ret;
+    char key_path[512], cert_path[512];
+    ptls_iovec_t* certs;
+    size_t cert_count = 0;
+    const uint8_t invalid[] = { 0x30, 0x01, 0xff };
+
+    ret = tls_api_init_ctx_ex2(&ctx, PICOQUIC_INTERNAL_TEST_VERSION_1,
+        PICOQUIC_TEST_SNI, PICOQUIC_TEST_ALPN, &simulated_time, NULL, NULL, 0, 0, 0,
+        NULL, 8, 0, 0, 1);
+    if (ret == 0)
+        ret = picoquic_get_input_path(cert_path, sizeof(cert_path), picoquic_solution_dir,
+            PICOQUIC_TEST_FILE_SERVER_CERT);
+    if (ret == 0) {
+        certs = picoquic_get_certs_from_file(cert_path, &cert_count);
+        if (certs == NULL || cert_count == 0) {
+            free(certs);
+            ret = -1;
+        } else
+            picoquic_set_tls_certificate_chain(ctx->qserver, certs, cert_count);
+    }
+    if (ret == 0)
+        ret = picoquic_get_input_path(key_path, sizeof(key_path), picoquic_solution_dir,
+            PICOQUIC_TEST_FILE_SERVER_KEY);
+    if (ret == 0) {
+        bio = BIO_new_file(key_path, "rb");
+        if (bio != NULL)
+            key = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+        if (key == NULL || (der_len = i2d_PrivateKey(key, NULL)) <= 0 ||
+            (der = malloc((size_t)der_len + 1)) == NULL)
+            ret = -1;
+    }
+    if (ret == 0) {
+        cursor = der;
+        if (i2d_PrivateKey(key, &cursor) != der_len ||
+            picoquic_set_tls_key(NULL, der, (size_t)der_len) == 0 ||
+            picoquic_set_tls_key(ctx->qserver, NULL, (size_t)der_len) == 0 ||
+            picoquic_set_tls_key(ctx->qserver, der, 0) == 0 ||
+            picoquic_set_tls_key(ctx->qclient, der, (size_t)der_len) == 0 ||
+            picoquic_set_tls_key(ctx->qserver, der, (size_t)der_len) != 0 ||
+            picoquic_set_tls_key(ctx->qserver, invalid, sizeof(invalid)) == 0)
+            ret = -1;
+    }
+    if (ret == 0) {
+        der[der_len] = 0;
+        if (picoquic_set_tls_key(ctx->qserver, der, (size_t)der_len + 1) == 0)
+            ret = -1;
+    }
+    if (ret == 0) {
+        ret = tls_api_connection_loop(ctx, &loss_mask, 0, &simulated_time);
+        if (ret == 0 &&
+            (ctx->cnx_client->cnx_state != picoquic_state_ready &&
+                ctx->cnx_client->cnx_state != picoquic_state_client_ready_start))
+            ret = -1;
+        if (ret == 0 &&
+            (ctx->cnx_server == NULL ||
+                (ctx->cnx_server->cnx_state != picoquic_state_ready &&
+                    ctx->cnx_server->cnx_state != picoquic_state_server_false_start)))
+            ret = -1;
+    }
+    if (ctx != NULL)
+        tls_api_delete_ctx(ctx);
+    free(der);
+    EVP_PKEY_free(key);
+    BIO_free(bio);
+    return ret;
+}
+
 
 int openssl_cert_test(void)
 {
@@ -98,7 +176,8 @@ int openssl_cert_test(void)
 
     if (openssl_cert_test_one(TEST_CERT1, 1) != 0 ||
         openssl_cert_test_one(TEST_CERT2, 1) != 0 ||
-        openssl_cert_test_one(TEST_CERT3, 2) != 0) {
+        openssl_cert_test_one(TEST_CERT3, 2) != 0 ||
+        openssl_der_key_test() != 0) {
         ret = -1;
     }
     return ret;
